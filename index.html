@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Permission-based visitor diagnostics">
+  <title>Visitor Diagnostics</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,sans-serif; background:#0b1020; color:#eef2ff; }
+    .wrap { max-width:900px; margin:auto; padding:32px 18px 60px; }
+    .card { background:#121a2f; border:1px solid #273250; border-radius:18px; padding:22px; margin:16px 0; }
+    h1 { margin:0 0 8px; font-size:30px; }
+    h2 { font-size:18px; margin-top:0; }
+    .muted { color:#aab4cf; }
+    button { border:0; border-radius:12px; padding:12px 16px; font-weight:700; cursor:pointer; background:#fff; color:#111827; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; }
+    .item { background:#0c1326; border-radius:12px; padding:12px; }
+    .key { color:#93a4c7; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+    .value { margin-top:4px; word-break:break-word; }
+    .notice { border-left:4px solid #fff; padding:10px 12px; background:#0d1529; }
+    #status { margin-top:12px; min-height:22px; }
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <div class="card">
+    <h1>Visitor Diagnostics</h1>
+    <p class="muted">This page shows technical information available from your browser. Precise location is requested only after you choose to share it.</p>
+    <div class="notice">
+      <strong>Privacy:</strong> IMEI and MAC address are not requested because ordinary websites cannot access them.
+    </div>
+    <p><button id="locationBtn">Share precise location</button></p>
+    <div id="status" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <h2>Collected information</h2>
+    <div id="info" class="grid"></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const info = {};
+  const set = (k, v) => {
+    if (v !== undefined && v !== null && v !== "") info[k] = String(v);
+  };
+
+  const ua = navigator.userAgent || "";
+  set("User agent", ua);
+  set("Language", navigator.language);
+  set("Languages", (navigator.languages || []).join(", "));
+  set("Timezone", Intl.DateTimeFormat().resolvedOptions().timeZone);
+  set("Platform", navigator.platform);
+  set("Online", navigator.onLine);
+  set("Cookies enabled", navigator.cookieEnabled);
+  set("Do Not Track", navigator.doNotTrack ?? "not set");
+  set("Screen", `${screen.width} × ${screen.height}`);
+  set("Available screen", `${screen.availWidth} × ${screen.availHeight}`);
+  set("Pixel ratio", window.devicePixelRatio);
+  set("Viewport", `${innerWidth} × ${innerHeight}`);
+  set("Touch points", navigator.maxTouchPoints);
+  set("CPU cores", navigator.hardwareConcurrency);
+  set("Device memory (approx.)", navigator.deviceMemory ? `${navigator.deviceMemory} GB` : "not exposed");
+  set("Referrer", document.referrer || "direct / unavailable");
+  set("Page", location.href);
+  set("Visit time", new Date().toISOString());
+
+  if (navigator.connection) {
+    set("Connection type", navigator.connection.effectiveType);
+    set("Downlink (approx.)", navigator.connection.downlink);
+    set("Save-data", navigator.connection.saveData);
+  }
+
+  const uaData = navigator.userAgentData;
+  if (uaData) {
+    set("Mobile", uaData.mobile);
+    if (uaData.platform) set("Platform (UA-CH)", uaData.platform);
+    if (uaData.brands) set("Browser brands", uaData.brands.map(x => `${x.brand} ${x.version}`).join(", "));
+  }
+
+  function render() {
+    const box = document.getElementById("info");
+    box.innerHTML = Object.entries(info).map(([k,v]) =>
+      `<div class="item"><div class="key">${escapeHtml(k)}</div><div class="value">${escapeHtml(v)}</div></div>`
+    ).join("");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  async function collect(extra={}) {
+    Object.assign(info, extra);
+    render();
+    try {
+      await fetch("/api/collect", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(info),
+        keepalive: true
+      });
+    } catch (_) {}
+  }
+
+  document.getElementById("locationBtn").addEventListener("click", () => {
+    const status = document.getElementById("status");
+    if (!navigator.geolocation) {
+      status.textContent = "Geolocation is not supported by this browser.";
+      return;
+    }
+    status.textContent = "Waiting for your location permission…";
+    navigator.geolocation.getCurrentPosition(
+      p => {
+        set("GPS latitude", p.coords.latitude);
+        set("GPS longitude", p.coords.longitude);
+        set("GPS accuracy (m)", p.coords.accuracy);
+        if (p.coords.altitude != null) set("GPS altitude (m)", p.coords.altitude);
+        set("GPS timestamp", new Date(p.timestamp).toISOString());
+        status.textContent = "Location shared successfully.";
+        collect({
+          "GPS latitude": p.coords.latitude,
+          "GPS longitude": p.coords.longitude,
+          "GPS accuracy (m)": p.coords.accuracy,
+          "GPS timestamp": new Date(p.timestamp).toISOString()
+        });
+      },
+      e => { status.textContent = `Location was not shared: ${e.message}`; },
+      {enableHighAccuracy:true, timeout:15000, maximumAge:0}
+    );
+  });
+
+  async function battery() {
+    if (!navigator.getBattery) return;
+    try {
+      const b = await navigator.getBattery();
+      const level = Math.round(b.level * 100);
+      set("Battery", `${level}%`);
+      set("Charging", b.charging);
+      render();
+      collect({"Battery": `${level}%`, "Charging": b.charging});
+    } catch (_) {}
+  }
+
+  render();
+  collect();
+  battery();
+})();
+</script>
+</body>
+</html>
